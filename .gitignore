@@ -1,0 +1,13 @@
+# Root .gitignore
+
+# Mac system files
+.DS_Store
+
+# Server (Go)
+server/p2p-backend
+server/p2p-backend.exe
+
+# Client (Node)
+client/node_modules/
+client/dist/
+client/.env
