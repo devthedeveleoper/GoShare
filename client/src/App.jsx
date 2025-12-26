@@ -4,7 +4,6 @@ import { QRCodeCanvas } from 'qrcode.react';
 import './App.css';
 
 // --- CONFIGURATION ---
-// Automatically detects if running on localhost or production (Render/Cloudflare)
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "localhost:8080";
 const PROTOCOL = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
 const WS_URL = `${PROTOCOL}${BACKEND_URL}/ws`;
@@ -66,7 +65,7 @@ function Room() {
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState("");
   const [speed, setSpeed] = useState("");
-  const [isDragging, setIsDragging] = useState(false); // Track drag hover state
+  const [isDragging, setIsDragging] = useState(false); 
 
   // WebRTC & Socket Refs
   const ws = useRef(null);
@@ -85,7 +84,6 @@ function Room() {
   const downloadAnchor = useRef(null);
 
   useEffect(() => {
-    // 1. Connect to WebSocket
     console.log("🔌 Connecting to:", WS_URL);
     ws.current = new WebSocket(WS_URL);
 
@@ -196,40 +194,64 @@ function Room() {
       sendFile(file);
   };
 
-  // --- File Sending Logic ---
+  // --- UPDATED SEND FILE LOGIC (Safe for Production) ---
   const sendFile = async (file) => {
     if (!file || !dc.current) return;
     
     setFileName(`Sending: ${file.name}`);
-    // Send Metadata first
-    dc.current.send(JSON.stringify({ type: 'meta', name: file.name, size: file.size }));
+    
+    try {
+        // Send Metadata
+        dc.current.send(JSON.stringify({ type: 'meta', name: file.name, size: file.size }));
+    } catch (err) {
+        console.error("Error sending meta:", err);
+        setStatus("Error: Connection lost");
+        return;
+    }
 
+    const MAX_BUFFERED_AMOUNT = 64 * 1024; // 64KB Buffer Limit
     let offset = 0;
+    
     lastBytesRef.current = 0;
     lastTimeRef.current = Date.now();
 
     try {
         while (offset < file.size) {
-            const slice = file.slice(offset, offset + CHUNK_SIZE);
-            const buffer = await slice.arrayBuffer();
-            
-            // Backpressure: Pause if buffer is full to prevent crash
-            if (dc.current.bufferedAmount > 16 * 1024 * 1024) {
-                await new Promise(r => setTimeout(r, 100));
+            // 1. Backpressure: Pause if buffer is full
+            while (dc.current.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                await new Promise(r => setTimeout(r, 10));
             }
 
-            dc.current.send(buffer);
-            offset += CHUNK_SIZE;
-            
-            // Stats
-            const percent = Math.min(100, (offset / file.size) * 100);
-            setProgress(percent);
-            updateSpeed(offset);
+            const slice = file.slice(offset, offset + CHUNK_SIZE);
+            const buffer = await slice.arrayBuffer();
+
+            // 2. Attempt Send with Retry
+            try {
+                dc.current.send(buffer);
+                offset += CHUNK_SIZE;
+
+                // Update Stats
+                const percent = Math.min(100, (offset / file.size) * 100);
+                setProgress(percent);
+                updateSpeed(offset);
+            } catch (error) {
+                // If queue full, wait and retry
+                if (error.name === 'OperationError' || error.message.includes('queue is full')) {
+                    console.warn("Buffer full. Retrying...");
+                    await new Promise(r => setTimeout(r, 200));
+                    continue; // Loop again with same offset
+                } else {
+                    throw error; // Fatal error
+                }
+            }
         }
-    } catch (err) { console.error(err); }
-    
-    setFileName("File Sent Successfully!");
-    setSpeed("");
+        setFileName("File Sent Successfully!");
+        setSpeed("");
+    } catch (err) {
+        console.error("Transfer failed:", err);
+        setStatus("Transfer interrupted.");
+        setFileName("Error sending file");
+    }
   };
 
   // --- File Receiving Logic ---
